@@ -26,6 +26,7 @@
 #' @import data.table
 #' @importMethodsFrom data.table key
 #' @import stringr
+#' @import XML
 
 ############################## setting skipNul to TRUE to avoid errors, overwriting the base R functionality for Flow
 readLines = function(con = stdin(), n = -1L , ok = TRUE, warn = TRUE, encoding = "unknown", skipNul = TRUE) {
@@ -629,7 +630,7 @@ setMethod('initialize', 'Job', function(.Object,
                                         qprior = 0,
                                         nice_val = 10,
                                         time = "3-00") {
-    require(stringr)
+    ## require(stringr)
     if (is.null(nice))
         nice = TRUE
 
@@ -1180,14 +1181,48 @@ setMethod('update', 'Job', function(object, check.inputs = TRUE, mc.cores = 1, c
     if (print.status)
         print(table(status(new.object)))
     ## weird R voodoo to modify object in place
-    eval(
-        eval(
-            substitute(
-                expression(object <<- new.object)
-               ,env=parent.frame(1) )
-        )
-    )
+
+    var = as.list(sys.call(1)[[2]])
+    if (length(var) > 1) call_x = var[[2]] else call_x = var[[1]]
+    pf = parent.frame(2); pf2 = parent.frame(3)
+    obj_string = deparse(sys.call(sys.nframe() - 1)[[2]])    
+    if (obj_string == ".Object" && tryCatch(exists(obj_string, pf), error = function(e) FALSE)) {
+        pf$.Object = new.object
+    }
+
+    if (is.name(call_x)) {
+        assign("tmp_234508972349087_", new.object, envir = pf)
+        assign("tmp_234508972349087_", new.object, envir = globalenv())
+        if (deparse(var[[1]]) == "[") {
+            idx = eval(var[[3]], pf, pf2)
+            if (is.logical(idx)) idx = which(idx)
+            if (is.character(idx))
+                arg2 = paste0('[', mkst(paste0("'", idx, "'")), ']')
+            else
+                arg2 = paste0('[', mkst(idx), ']')
+        } else {
+            arg2 = ""
+        }
+        ## sys.call(sys.nframe() - 2)
+        expr = parse(text = sprintf("%s%s = tmp_234508972349087_", deparse(call_x), arg2))
+        eval(expr, pf)
+        eval(expr, globalenv())
+    }
+    suppressWarnings({
+        rm(list = "tmp_234508972349087_", envir = pf)
+        rm(list = "tmp_234508972349087_", envir = globalenv())
+    })
     cat('')
+
+    
+    ## eval(
+    ##     eval(
+    ##         substitute(
+    ##             expression(object <<- new.object)
+    ##            ,env=parent.frame(1) )
+    ##     )
+    ## )
+    ## cat('')
 })
 
 
@@ -1864,7 +1899,7 @@ setGeneric('run', function(.Object, ...) {standardGeneric('run')})
 #' @author Marcin Imielinski
 setMethod('run', 'Job', function(.Object, mc.cores = 1, all = FALSE, quiet = TRUE)
     {
-        require(parallel)
+        ## require(parallel)
 
 
         cmds = cmd(.Object, quiet = quiet, all = all)
@@ -2630,7 +2665,8 @@ make_chunks = function(vec, max_per_chunk = 100) {
     io_n_val = .Object@runinfo[ix]$io_n
     qprior_val = .Object@runinfo[ix]$qprior
     nice_val = .Object@runinfo[ix]$nice_val
-    if (!is.null(io_c_val) & !is.null(io_n_val) & !is.null(qprior_val)) {
+    time = .Object@runinfo[ix]$time
+    if (!is.null(io_c_val) & !is.null(io_n_val) & !is.null(qprior_val) & !is.null(nice_val) & !is.null(time)) {
         if (any(! .Object@runinfo$io_c %in% seq(0, 3))) {
             message("invalid io_c parameter(s) specified\nMust be integer between 0 and 3")
             halt = TRUE
@@ -2651,13 +2687,18 @@ make_chunks = function(vec, max_per_chunk = 100) {
             stop("invalid parameters specified... reset using valid parameters")
         }
     } else {
-        warning("Flow object may be outdated, setting io_c, io_n, and qprior values to defaults")
+        warning("Flow object may be outdated, setting io_c, io_n, qprior, nice, and time values to defaults")
         io_c_val = 2
         ##        io_n_val = 7
         io_n_val = 4
         qprior_val = 0
         nice_val = 10
         time = '3-00'
+        .Object@runinfo$io_c = io_c_val
+        .Object@runinfo$io_n = io_n_val
+        .Object@runinfo$qprior = qprior_val
+        .Object@runinfo$nice_val = nice_val
+        .Object@runinfo$time = time
     }
     
     ## utility func for instantiation of Job and modifying memory
@@ -2672,8 +2713,8 @@ make_chunks = function(vec, max_per_chunk = 100) {
     .Object@runinfo[, cmd.quiet := '']
     ## .Object@runinfo[ix, cmd := paste('umask 002; flow_go=$( pwd ); cd ', outdir, ';touch ', outdir, '/started; ', ifelse(nice, '(ionice -c2 -n7 nice ', ''), '/usr/bin/time -v ', cmd.og, ' ) 2>&1 | tee ', stdout, '; cp ', stdout, ' ', stderr, ';cd $flow_go',  sep = '')]
     ## .Object@runinfo[ix, cmd.quiet := paste('umask 002; flow_go=$( pwd ); cd ', outdir, ';touch ', outdir, '/started; ', ifelse(nice, 'ionice -c2 -n7 nice ', ''), '/usr/bin/time -v ', cmd.og, ' &> ', stdout, '; cp ', stdout, ' ', stderr, ';cd $flow_go',  sep = '')]
-    .Object@runinfo[ix, cmd := paste('{ umask 002; flow_go=$( pwd ); cd ', outdir, ';touch ', outdir, '/started; ', ifelse(nice, sprintf('{ echo \"$(date), running in $(pwd) \"; ionice -c %s -n %s nice --adjustment=%s ', io_c_val, io_n_val, nice_val), ''), '/usr/bin/time -v ', cmd.og, '; } 2>&1 | tee ', stdout, '; cp ', stdout, ' ', stderr, ';cd $flow_go; exit 0; }',  sep = '')]
-    .Object@runinfo[ix, cmd.quiet := paste('{ umask 002; flow_go=$( pwd ); cd ', outdir, ';touch ', outdir, '/started; ', ifelse(nice, sprintf('echo \"$(date), running in $(pwd) \"; ionice -c %s -n %s nice --adjustment=%s ', io_c_val, io_n_val, nice_val), ''), '/usr/bin/time -v ', cmd.og, ' &> ', stdout, '; cp ', stdout, ' ', stderr, ';cd $flow_go; exit 0; }',  sep = '')]
+    .Object@runinfo[ix, cmd := paste('{ umask 002; flow_go=$( pwd ); cd ', outdir, ';touch ', outdir, '/started; ', ifelse(nice, sprintf('{ echo \"$(date), running in %s \"; ionice -c %s -n %s nice --adjustment=%s ', outdir, io_c_val, io_n_val, nice_val), ''), '/usr/bin/time -v ', cmd.og, '; } 2>&1 | tee ', stdout, '; cp ', stdout, ' ', stderr, ';cd $flow_go; exit 0; }',  sep = '')]
+    .Object@runinfo[ix, cmd.quiet := paste('{ umask 002; flow_go=$( pwd ); cd ', outdir, ';touch ', outdir, '/started; ', ifelse(nice, sprintf('echo \"$(date), running in %s \"; ionice -c %s -n %s nice --adjustment=%s ', outdir, io_c_val, io_n_val, nice_val), ''), '/usr/bin/time -v ', cmd.og, ' &> ', stdout, '; cp ', stdout, ' ', stderr, ';cd $flow_go; exit 0; }',  sep = '')]
 
     .Object@runinfo$cmd.path = paste(outdir(.Object), '/', names(outdir(.Object)), '.cmd.sh', sep = '')
     
@@ -2949,7 +2990,7 @@ setMethod('report', 'Job', function(.Object, mc.cores = 1, force = FALSE)
 #' @author Marcin Imielinski
 xml2task = function(path, module = NULL, out.file = NULL)
     {
-        require(XML)
+        ## require(XML)
 
         tasks = xmlToList(xmlParse(path))
         tasks = tasks[which(names(tasks)=='pipeline-configuration')]
